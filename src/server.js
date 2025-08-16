@@ -8,7 +8,6 @@ import {
   InteractionResponseType,
   InteractionType,
   verifyKey,
-  InteractionResponseFlags, // imported for parity with sample (not used: we send public messages)
 } from 'discord-interactions';
 import { LINK_COMMAND, UNLINK_COMMAND } from './commands.js';
 
@@ -47,7 +46,17 @@ function getOption(interaction, name) {
   return found?.value;
 }
 
-async function postJSON(url, token, body) {
+// Compose backend URL safely (no accidental double slashes)
+function adminUrl(path) {
+  const base = ADMIN_BASE.replace(/\/+$/, '');
+  const p = String(path || '').replace(/^\/+/, '');
+  return `${base}/${p}`;
+}
+
+async function postJSON(path, token, body) {
+  if (!token) throw new Error('ADMIN_TOKEN not set in this worker');
+
+  const url = adminUrl(path);
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -56,14 +65,15 @@ async function postJSON(url, token, body) {
     },
     body: JSON.stringify(body),
   });
-  let data = {};
-  try {
-    data = await res.json();
-  } catch (_) {}
+
+  let text = '';
+  try { text = await res.text(); } catch {}
+
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status} ${res.statusText}${data ? `: ${JSON.stringify(data)}` : ''}`);
+    throw new Error(`HTTP ${res.status} ${res.statusText} – ${text || '(no body)'} – ${url}`);
   }
-  return data;
+
+  try { return JSON.parse(text); } catch { return {}; }
 }
 
 async function verifyDiscordRequest(request, env) {
@@ -115,7 +125,9 @@ router.post('/', async (request, env) => {
           // Expected required options on your command:
           //   - twitch_login (STRING)  // or legacy 'login'
           //   - discord_user (USER)
-          const loginOpt = getOption(interaction, 'twitch_login') ?? getOption(interaction, 'login'); // support old name
+          const loginOpt =
+            getOption(interaction, 'twitch_login') ??
+            getOption(interaction, 'login'); // support old name if still registered
           const discordUserOpt = getOption(interaction, 'discord_user'); // USER option resolves to a user ID
 
           const login = String(loginOpt ?? '').trim().toLowerCase();
@@ -131,9 +143,11 @@ router.post('/', async (request, env) => {
           }
 
           const payload = { login, discord_user_id: discordUserId };
-          const res = await postJSON(`${ADMIN_BASE}/admin/register`, env.ADMIN_TOKEN, payload);
+          const res = await postJSON('/admin/register', env.ADMIN_TOKEN, payload);
 
-          const created = Array.isArray(res.created) && res.created.length ? ` (created: ${res.created.join(', ')})` : '';
+          const created = Array.isArray(res.created) && res.created.length
+            ? ` (created: ${res.created.join(', ')})`
+            : '';
 
           return new JsonResponse({
             type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
@@ -154,7 +168,9 @@ router.post('/', async (request, env) => {
           // Accept either:
           //   - twitch_login (STRING) / legacy 'login'
           //   - broadcaster_id (STRING)
-          const loginOpt = getOption(interaction, 'twitch_login') ?? getOption(interaction, 'login');
+          const loginOpt =
+            getOption(interaction, 'twitch_login') ??
+            getOption(interaction, 'login');
           const bidOpt = getOption(interaction, 'broadcaster_id');
 
           if (!loginOpt && !bidOpt) {
@@ -172,12 +188,13 @@ router.post('/', async (request, env) => {
           if (loginOpt) payload.login = String(loginOpt).trim().toLowerCase();
           if (bidOpt) payload.broadcaster_id = String(bidOpt).trim();
 
-          const res = await postJSON(`${ADMIN_BASE}/admin/unregister`, env.ADMIN_TOKEN, payload);
+          const res = await postJSON('/admin/unregister', env.ADMIN_TOKEN, payload);
 
           return new JsonResponse({
             type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
             data: {
-              content: `✅ Unlinked Twitch ID \`${res?.broadcaster_id || payload.broadcaster_id || 'unknown'}\` (EventSub removed, mapping cleared)`,
+              content:
+                `✅ Unlinked Twitch ID \`${res?.broadcaster_id || payload.broadcaster_id || 'unknown'}\` (EventSub removed, mapping cleared)`,
             },
           });
         } catch (err) {
@@ -199,11 +216,11 @@ router.post('/', async (request, env) => {
 
 router.all('*', () => new Response('Not Found.', { status: 404 }));
 
-/* --------- Export (keep single declaration for ESM) --------- */
+/* --------- Export (single declaration for ESM) --------- */
 
 const server = {
   fetch: router.fetch,
-  verifyDiscordRequest, // exported for parity with sample (not used externally by CF)
+  verifyDiscordRequest, // parity with sample
 };
 
 export default server;
